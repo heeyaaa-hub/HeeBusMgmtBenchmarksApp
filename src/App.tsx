@@ -140,7 +140,7 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
               width={90}
             />
             <Tooltip
-              formatter={(v: number | null) => [
+              formatter={(v) => [
                 v != null ? formatValue(String(v), currency) : '—',
                 selectedMetric,
               ]}

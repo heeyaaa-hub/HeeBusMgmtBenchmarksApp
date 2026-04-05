@@ -48,10 +48,11 @@ interface CompanyPanelProps {
   showPlaceholder?: boolean
   afterSelectorContent?: React.ReactNode
   onDataReady?: (rows: FinancialRow[], company: string) => void
+  onBenchmarkReady?: (data: Record<string, number>) => void
   showBenchmark?: boolean
 }
 
-function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabled, company, onCompanyChange, hideCompanySelector, selectorLabel, includeNoneOption, showPlaceholder, afterSelectorContent, onDataReady, showBenchmark }: CompanyPanelProps) {
+function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabled, company, onCompanyChange, hideCompanySelector, selectorLabel, includeNoneOption, showPlaceholder, afterSelectorContent, onDataReady, onBenchmarkReady, showBenchmark }: CompanyPanelProps) {
   const isControlled = company !== undefined
   const [internalCompany, setInternalCompany] = useState(defaultCompany)
   const selectedCompany = isControlled ? company : internalCompany
@@ -115,9 +116,9 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
   // Benchmark data: maps year string → segment-average ROA %
   const [benchmarkByYear, setBenchmarkByYear] = useState<Record<string, number>>({})
 
-  // Fetch segment benchmark data when toggle is on and segment is known
+  // Fetch segment benchmark data whenever segment is known (used for chart line + interpretation)
   useEffect(() => {
-    if (!showBenchmark || !segment) return
+    if (!segment) return
     const query = `
       SELECT year, Return_on_Assets
       FROM segment_metrics
@@ -134,9 +135,10 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
           }
         })
         setBenchmarkByYear(map)
+        onBenchmarkReady?.(map)
       })
       .catch(() => { /* silently skip benchmark if fetch fails */ })
-  }, [showBenchmark, segment])
+  }, [segment])
 
   const chartData = yearlyData.map(row => {
     const benchmarkVal = (showBenchmark && isROA && benchmarkByYear[row.year] != null)
@@ -328,6 +330,12 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
 interface PanelSnapshot {
   company: string
   rows: FinancialRow[]
+  segment: string
+}
+
+interface InterpretationSection {
+  title: string
+  text: string
 }
 
 interface ValidRow {
@@ -348,113 +356,210 @@ function toValidRows(rows: FinancialRow[]): ValidRow[] {
     }))
 }
 
-// Determine what drives a company's ROA based on its latest NPM and AT values
-function driverLabel(npm: number, at: number): string {
-  const highNPM = npm > 8
-  const highAT  = at > 1.8
-  if (highNPM && !highAT) return 'margin-driven'
-  if (!highNPM && highAT) return 'efficiency-driven'
-  if (highNPM && highAT)  return 'strong on both margin and asset turnover'
-  return 'balanced between margin and asset turnover'
+function classifyChange(change: number): 'improving' | 'declining' | 'stable' {
+  if (change >  1) return 'improving'
+  if (change < -1) return 'declining'
+  return 'stable'
 }
 
-// Compare latest ROA vs previous year and classify direction
-function trendLabel(valid: ValidRow[]): { label: string; diff: number } {
-  if (valid.length < 2) return { label: 'stable', diff: 0 }
-  const diff = valid[valid.length - 1].roa - valid[valid.length - 2].roa
-  if (diff >  2) return { label: 'improving strongly', diff }
-  if (diff >  0.5) return { label: 'improving',        diff }
-  if (diff < -2) return { label: 'declining sharply',  diff }
-  if (diff < -0.5) return { label: 'declining',        diff }
-  return { label: 'stable', diff }
+function analyzeTrend(valid: ValidRow[]) {
+  if (valid.length < 2) return {
+    direction: 'stable' as const, recentDirection: 'stable' as const,
+    totalChange: 0, recentChange: 0,
+    firstYear: valid[0]?.year ?? '', latestYear: valid[0]?.year ?? '',
+    yearsCount: valid.length,
+  }
+  const first  = valid[0]
+  const latest = valid[valid.length - 1]
+  const prev   = valid[valid.length - 2]
+  return {
+    direction:       classifyChange(latest.roa - first.roa),
+    recentDirection: classifyChange(latest.roa - prev.roa),
+    totalChange:     latest.roa - first.roa,
+    recentChange:    latest.roa - prev.roa,
+    firstYear:       first.year,
+    latestYear:      latest.year,
+    yearsCount:      valid.length,
+  }
 }
 
-// When ROA is declining, figure out which factor weakened more (relative change)
-function declineDriver(valid: ValidRow[]): string {
-  if (valid.length < 2) return ''
-  const prev = valid[valid.length - 2]
-  const curr = valid[valid.length - 1]
-  const npmRelDrop = prev.npm !== 0 ? (prev.npm - curr.npm) / Math.abs(prev.npm) : 0
-  const atRelDrop  = prev.at  !== 0 ? (prev.at  - curr.at)  / Math.abs(prev.at)  : 0
-  if (npmRelDrop > atRelDrop + 0.05) return 'net profit margin'
-  if (atRelDrop  > npmRelDrop + 0.05) return 'asset turnover'
-  return ''
+function analyzeDriver(latest: ValidRow, prev: ValidRow | null) {
+  const highNPM = latest.npm > 8
+  const highAT  = latest.at  > 1.8
+
+  let dominantFactor: 'margin' | 'turnover' | 'both' | 'neither'
+  let strategy: string
+  if      (highNPM && !highAT) { dominantFactor = 'margin';  strategy = 'margin-driven' }
+  else if (!highNPM && highAT) { dominantFactor = 'turnover'; strategy = 'efficiency-driven' }
+  else if (highNPM && highAT)  { dominantFactor = 'both';     strategy = 'strong on both margin and efficiency' }
+  else                          { dominantFactor = 'neither';  strategy = 'under pressure on both margin and efficiency' }
+
+  let driverOfChange: 'margin' | 'turnover' | null = null
+  if (prev) {
+    const npmRel = prev.npm !== 0 ? Math.abs((latest.npm - prev.npm) / prev.npm) : 0
+    const atRel  = prev.at  !== 0 ? Math.abs((latest.at  - prev.at)  / prev.at)  : 0
+    if      (npmRel > atRel  + 0.05) driverOfChange = 'margin'
+    else if (atRel  > npmRel + 0.05) driverOfChange = 'turnover'
+  }
+  return { dominantFactor, strategy, driverOfChange }
 }
 
-function buildSingleInterpretation(snap: PanelSnapshot): string[] {
+function bmarkPosition(roa: number, bmarkROA: number, segment: string): string {
+  const diff    = roa - bmarkROA
+  const absDiff = Math.abs(diff)
+  if (absDiff < 0.5) return `roughly in line with the ${segment} segment average (${formatPercent(bmarkROA)})`
+  const qualifier = absDiff > 5 ? 'well ' : absDiff > 2 ? '' : 'slightly '
+  const direction = diff > 0 ? 'above' : 'below'
+  return `${qualifier}${direction} the ${segment} segment average of ${formatPercent(bmarkROA)} by ${formatPercent(absDiff)}`
+}
+
+function buildSingleInterpretation(
+  snap: PanelSnapshot,
+  benchmarkByYear: Record<string, number>
+): InterpretationSection[] {
   const valid = toValidRows(snap.rows)
   if (valid.length === 0) return []
-  const latest = valid[valid.length - 1]
-  const sentences: string[] = []
 
-  // Sentence 1: what drives this company's ROA
-  sentences.push(
-    `${snap.company} appears to be ${driverLabel(latest.npm, latest.at)}, ` +
-    `with a net profit margin of ${formatPercent(latest.npm)} and asset turnover of ${latest.at.toFixed(2)}x as of ${latest.year}.`
-  )
+  const latest  = valid[valid.length - 1]
+  const prev    = valid.length >= 2 ? valid[valid.length - 2] : null
+  const trend   = analyzeTrend(valid)
+  const driver  = analyzeDriver(latest, prev)
+  const bmarkROA = benchmarkByYear[latest.year]
+  const sections: InterpretationSection[] = []
 
-  // Sentence 2: trend
-  const trend = trendLabel(valid)
-  if (trend.label === 'stable') {
-    sentences.push(`ROA has remained relatively stable, most recently at ${formatPercent(latest.roa)}.`)
-  } else if (trend.label.startsWith('improving')) {
-    sentences.push(`ROA is ${trend.label}, reaching ${formatPercent(latest.roa)} in ${latest.year}.`)
+  // ── Summary ──
+  let summaryText = `In ${latest.year}, ${snap.company} achieved an ROA of ${formatPercent(latest.roa)}`
+  if (bmarkROA != null) summaryText += ` — ${bmarkPosition(latest.roa, bmarkROA, snap.segment)}.`
+  else                  summaryText += '.'
+  sections.push({ title: 'Summary', text: summaryText })
+
+  // ── Trend ──
+  let trendText: string
+  if (valid.length < 2) {
+    trendText = 'Only one year of data is available — trend analysis is not yet possible.'
+  } else if (trend.direction === 'stable' && trend.recentDirection === 'stable') {
+    trendText = `ROA has remained relatively stable across ${trend.yearsCount} years of available data.`
+  } else if (trend.direction === trend.recentDirection) {
+    const word = trend.direction === 'improving' ? 'risen' : 'fallen'
+    trendText = `ROA has ${word} consistently from ${formatPercent(valid[0].roa)} in ${trend.firstYear} to ${formatPercent(latest.roa)} in ${trend.latestYear}.`
   } else {
-    const driver = declineDriver(valid)
-    const note = driver ? `, driven mainly by a weaker ${driver}` : ''
-    sentences.push(`ROA is ${trend.label}${note}, falling to ${formatPercent(latest.roa)} in ${latest.year}.`)
+    const longWord = trend.direction === 'improving' ? 'improving' : 'declining'
+    const recentWord = trend.recentDirection === 'improving'
+      ? `recovered in ${trend.latestYear}` : `pulled back in ${trend.latestYear}`
+    trendText = `ROA followed a ${longWord} trend overall (${formatPercent(valid[0].roa)} in ${trend.firstYear} → ${formatPercent(latest.roa)} in ${trend.latestYear}), though it ${recentWord}.`
   }
+  sections.push({ title: 'Trend', text: trendText })
 
-  return sentences
+  // ── Driver ──
+  let driverText = `${snap.company} is ${driver.strategy}, with a net profit margin of ${formatPercent(latest.npm)} and asset turnover of ${latest.at.toFixed(2)}x.`
+  if (driver.driverOfChange && prev) {
+    const changeWord = latest.roa > prev.roa ? 'improvement' : 'decline'
+    if (driver.driverOfChange === 'margin') {
+      const dir = latest.npm > prev.npm ? 'rising' : 'falling'
+      driverText += ` The recent ${changeWord} was driven mainly by ${dir} margins (${formatPercent(prev.npm)} → ${formatPercent(latest.npm)}).`
+    } else {
+      const dir = latest.at > prev.at ? 'improved' : 'weakened'
+      driverText += ` The recent ${changeWord} was driven mainly by ${dir} asset utilisation (${prev.at.toFixed(2)}x → ${latest.at.toFixed(2)}x).`
+    }
+  }
+  sections.push({ title: 'Driver', text: driverText })
+
+  // ── Strategy ──
+  let strategyText: string
+  if      (driver.dominantFactor === 'margin')   strategyText = `${snap.company} operates a high-margin strategy, prioritising profitability per sale over volume. This is sustainable as long as pricing power and brand strength are maintained.`
+  else if (driver.dominantFactor === 'turnover') strategyText = `${snap.company} operates a high-volume, efficiency-led model — generating returns through rapid asset utilisation rather than wide margins. This is typical of discounters and high-turnover retailers.`
+  else if (driver.dominantFactor === 'both')     strategyText = `${snap.company} benefits from both strong margins and high asset efficiency — a competitive combination that suggests a well-positioned and well-executed business model.`
+  else                                            strategyText = `${snap.company} faces pressure on both margin and asset utilisation, which constrains ROA. Strengthening either dimension would meaningfully improve returns.`
+  sections.push({ title: 'Strategy', text: strategyText })
+
+  return sections
 }
 
-function buildComparisonInterpretation(snap1: PanelSnapshot, snap2: PanelSnapshot): string[] {
+function buildComparisonInterpretation(
+  snap1: PanelSnapshot, snap2: PanelSnapshot,
+  bench1: Record<string, number>, bench2: Record<string, number>
+): InterpretationSection[] {
   const v1 = toValidRows(snap1.rows)
   const v2 = toValidRows(snap2.rows)
   if (v1.length === 0 || v2.length === 0) return []
-  const l1 = v1[v1.length - 1]
-  const l2 = v2[v2.length - 1]
-  const sentences: string[] = []
 
-  // Sentence 1: which company has higher ROA right now
-  const diff = Math.abs(l1.roa - l2.roa)
-  if (diff < 0.5) {
-    sentences.push(
-      `${snap1.company} and ${snap2.company} show similar ROA in ${l1.year} ` +
-      `(${formatPercent(l1.roa)} vs ${formatPercent(l2.roa)}).`
-    )
+  const l1    = v1[v1.length - 1]
+  const l2    = v2[v2.length - 1]
+  const prev1 = v1.length >= 2 ? v1[v1.length - 2] : null
+  const prev2 = v2.length >= 2 ? v2[v2.length - 2] : null
+  const trend1  = analyzeTrend(v1)
+  const trend2  = analyzeTrend(v2)
+  const driver1 = analyzeDriver(l1, prev1)
+  const driver2 = analyzeDriver(l2, prev2)
+  const sections: InterpretationSection[] = []
+
+  // ── Summary ──
+  const roaDiff = Math.abs(l1.roa - l2.roa)
+  const [better, worse, betterROA, worseROA] = l1.roa >= l2.roa
+    ? [snap1.company, snap2.company, l1.roa, l2.roa]
+    : [snap2.company, snap1.company, l2.roa, l1.roa]
+  let summaryText: string
+  if (roaDiff < 0.5) {
+    summaryText = `In ${l1.year}, ${snap1.company} and ${snap2.company} show similar ROA performance (${formatPercent(l1.roa)} vs ${formatPercent(l2.roa)}).`
   } else {
-    const [better, worse, betterROA, worseROA] = l1.roa > l2.roa
-      ? [snap1.company, snap2.company, l1.roa, l2.roa]
-      : [snap2.company, snap1.company, l2.roa, l1.roa]
-    const strength = diff > 3 ? 'significantly outperforms' : 'outperforms'
-    sentences.push(
-      `${better} ${strength} ${worse} in recent ROA ` +
-      `(${formatPercent(betterROA)} vs ${formatPercent(worseROA)} in ${l1.year}).`
-    )
+    const strength = roaDiff > 5 ? 'significantly outperforms' : roaDiff > 2 ? 'outperforms' : 'edges ahead of'
+    summaryText = `In ${l1.year}, ${better} ${strength} ${worse} in ROA — ${formatPercent(betterROA)} vs ${formatPercent(worseROA)}, a gap of ${formatPercent(roaDiff)}.`
+  }
+  sections.push({ title: 'Summary', text: summaryText })
+
+  // ── vs Benchmark ──
+  const b1 = bench1[l1.year]
+  const b2 = bench2[l2.year]
+  if (b1 != null || b2 != null) {
+    const parts: string[] = []
+    if (b1 != null) parts.push(`${snap1.company} is ${bmarkPosition(l1.roa, b1, snap1.segment)}`)
+    if (b2 != null) parts.push(`${snap2.company} is ${bmarkPosition(l2.roa, b2, snap2.segment)}`)
+    sections.push({ title: 'vs Benchmark', text: parts.join('; ') + '.' })
   }
 
-  // Sentence 2: compare what drives each company (only if different)
-  const d1 = driverLabel(l1.npm, l1.at)
-  const d2 = driverLabel(l2.npm, l2.at)
-  if (d1 !== d2) {
-    sentences.push(`${snap1.company} is ${d1}, while ${snap2.company} is ${d2}.`)
+  // ── Trend ──
+  const trendDesc = (t: ReturnType<typeof analyzeTrend>, name: string, valid: ValidRow[]) => {
+    if (t.direction === 'stable') return `${name}'s ROA has been stable`
+    const word = t.direction === 'improving' ? 'improving' : 'declining'
+    return `${name}'s ROA has been ${word} (${formatPercent(valid[0].roa)} in ${t.firstYear} → ${formatPercent(valid[valid.length - 1].roa)} in ${t.latestYear})`
   }
-
-  // Sentence 3: compare trends (only if they differ or one is notable)
-  const t1 = trendLabel(v1)
-  const t2 = trendLabel(v2)
-  const t1Notable = t1.label !== 'stable'
-  const t2Notable = t2.label !== 'stable'
-  if (t1Notable && t2Notable && t1.label !== t2.label) {
-    sentences.push(`${snap1.company}'s ROA is ${t1.label}, while ${snap2.company}'s is ${t2.label}.`)
-  } else if (t1Notable && !t2Notable) {
-    sentences.push(`${snap1.company}'s ROA is ${t1.label}, while ${snap2.company}'s has remained stable.`)
-  } else if (!t1Notable && t2Notable) {
-    sentences.push(`${snap2.company}'s ROA is ${t2.label}, while ${snap1.company}'s has remained stable.`)
+  let trendText: string
+  if (trend1.direction === trend2.direction) {
+    const shared = trend1.direction === 'improving' ? 'Both companies show improving ROA trends'
+      : trend1.direction === 'declining' ? 'Both companies show declining ROA trends'
+      : 'Both companies show stable ROA'
+    trendText = `${shared}, though ${better} maintains the stronger level.`
+  } else {
+    trendText = `${trendDesc(trend1, snap1.company, v1)}, while ${trendDesc(trend2, snap2.company, v2)}.`
   }
+  sections.push({ title: 'Trend', text: trendText })
 
-  return sentences
+  // ── Driver ──
+  let driverText: string
+  if (driver1.strategy === driver2.strategy) {
+    driverText = `Both companies are ${driver1.strategy}, though ${better} converts this approach into stronger returns.`
+  } else {
+    driverText = `${snap1.company} is ${driver1.strategy} (margin: ${formatPercent(l1.npm)}, turnover: ${l1.at.toFixed(2)}x), while ${snap2.company} is ${driver2.strategy} (margin: ${formatPercent(l2.npm)}, turnover: ${l2.at.toFixed(2)}x).`
+  }
+  sections.push({ title: 'Driver', text: driverText })
+
+  // ── Strategy ──
+  const factorLabel = (f: 'margin' | 'turnover' | 'both' | 'neither') =>
+    f === 'margin'   ? 'pricing power and brand strength' :
+    f === 'turnover' ? 'volume and asset efficiency' :
+    f === 'both'     ? 'a dual advantage in margin and efficiency' :
+                       'challenges on both margin and efficiency'
+  let strategyText: string
+  if (driver1.dominantFactor !== driver2.dominantFactor) {
+    strategyText = `The two companies represent different business models: ${snap1.company} relies on ${factorLabel(driver1.dominantFactor)}, while ${snap2.company} competes through ${factorLabel(driver2.dominantFactor)}.`
+  } else if (driver1.dominantFactor === 'neither') {
+    strategyText = `Both companies face similar challenges on margin and efficiency. Improving either dimension would strengthen returns for both.`
+  } else {
+    strategyText = `Both companies compete with a similar strategy (${driver1.strategy}). The performance gap likely reflects execution differences — ${better} is currently more effective at this approach.`
+  }
+  sections.push({ title: 'Strategy', text: strategyText })
+
+  return sections
 }
 
 // ---------- App ----------
@@ -468,6 +573,8 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [panel1Snap, setPanel1Snap] = useState<PanelSnapshot | null>(null)
   const [panel2Snap, setPanel2Snap] = useState<PanelSnapshot | null>(null)
+  const [panel1Benchmark, setPanel1Benchmark] = useState<Record<string, number>>({})
+  const [panel2Benchmark, setPanel2Benchmark] = useState<Record<string, number>>({})
   const [showBenchmark, setShowBenchmark] = useState(false)
   const [roaExpanded, setRoaExpanded] = useState(false)
 
@@ -591,7 +698,8 @@ function App() {
                 </select>
               </div>
             ) : undefined}
-            onDataReady={(rows, company) => setPanel1Snap({ rows, company })}
+            onDataReady={(rows, company) => setPanel1Snap({ rows, company, segment: rows[0]?.segment ?? '' })}
+            onBenchmarkReady={setPanel1Benchmark}
             showBenchmark={showBenchmark}
           />
           {secondCompany !== 'none' && (
@@ -607,7 +715,8 @@ function App() {
                 onCompanyChange={setSecondCompany}
                 selectorLabel="Compare with:"
                 includeNoneOption={true}
-                onDataReady={(rows, company) => setPanel2Snap({ rows, company })}
+                onDataReady={(rows, company) => setPanel2Snap({ rows, company, segment: rows[0]?.segment ?? '' })}
+                onBenchmarkReady={setPanel2Benchmark}
                 showBenchmark={showBenchmark}
               />
             </>
@@ -618,17 +727,20 @@ function App() {
       {/* ── Interpretation section (only for ROA metric) ── */}
       {!initLoading && !error && selectedMetric === 'roa' && (() => {
         const isComparison = secondCompany !== 'none'
-        const sentences = isComparison && panel1Snap && panel2Snap
-          ? buildComparisonInterpretation(panel1Snap, panel2Snap)
+        const sections = isComparison && panel1Snap && panel2Snap
+          ? buildComparisonInterpretation(panel1Snap, panel2Snap, panel1Benchmark, panel2Benchmark)
           : panel1Snap
-            ? buildSingleInterpretation(panel1Snap)
+            ? buildSingleInterpretation(panel1Snap, panel1Benchmark)
             : []
-        if (sentences.length === 0) return null
+        if (sections.length === 0) return null
         return (
-          <div className="w-full mt-2 bg-amber-50 border border-amber-200 rounded-lg px-6 py-4">
-            <p className="text-xs font-semibold uppercase tracking-wide text-amber-600 mb-2">Analysis</p>
-            {sentences.map((s, i) => (
-              <p key={i} className="text-sm text-gray-700 leading-relaxed">{s}</p>
+          <div className="w-full mt-2 bg-amber-50 border border-amber-200 rounded-lg px-6 py-4 space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">Analysis</p>
+            {sections.map((section, i) => (
+              <div key={i} className={i > 0 ? 'pt-3 border-t border-amber-100' : ''}>
+                <p className="text-xs font-bold uppercase tracking-wide text-amber-500 mb-1">{section.title}</p>
+                <p className="text-sm text-gray-700 leading-relaxed">{section.text}</p>
+              </div>
             ))}
           </div>
         )

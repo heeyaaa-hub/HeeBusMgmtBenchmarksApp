@@ -184,7 +184,7 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
 
       {!selectedCompany ? (
         <div className="flex items-center justify-center py-20">
-          <p className="text-gray-400 text-lg text-center">Please select a company to view ROA analysis</p>
+          <p className="text-gray-400 text-lg text-center">Select a metric and a company to begin your financial analysis.</p>
         </div>
       ) : (
         <>

@@ -40,18 +40,23 @@ interface CompanyPanelProps {
   defaultCompany: string
   selectedMetric: string
   disabled: boolean
+  company?: string
+  onCompanyChange?: (v: string) => void
+  hideCompanySelector?: boolean
 }
 
-function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabled }: CompanyPanelProps) {
-  const [selectedCompany, setSelectedCompany] = useState(defaultCompany)
+function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabled, company, onCompanyChange, hideCompanySelector }: CompanyPanelProps) {
+  const isControlled = company !== undefined
+  const [internalCompany, setInternalCompany] = useState(defaultCompany)
+  const selectedCompany = isControlled ? company : internalCompany
   const [yearlyData, setYearlyData] = useState<FinancialRow[]>([])
   const [fetching, setFetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // When defaultCompany is first set (after init load), apply it
+  // When defaultCompany is first set (after init load), apply it (uncontrolled only)
   useEffect(() => {
-    if (defaultCompany) setSelectedCompany(defaultCompany)
-  }, [defaultCompany])
+    if (!isControlled && defaultCompany) setInternalCompany(defaultCompany)
+  }, [defaultCompany, isControlled])
 
   // Fetch all years for the selected company
   useEffect(() => {
@@ -105,23 +110,30 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
       : (row[selectedMetric] !== '' ? Number(row[selectedMetric]) : null),
   }))
 
+  const handleCompanyChange = (val: string) => {
+    if (!isControlled) setInternalCompany(val)
+    onCompanyChange?.(val)
+  }
+
   return (
     <div className="flex-1 min-w-0">
       {/* Company menu for this panel */}
-      <div className="flex items-center justify-center gap-3 mb-4">
-        <label htmlFor={`company-select-${id}`} className="text-lg font-medium">Company:</label>
-        <select
-          id={`company-select-${id}`}
-          value={selectedCompany}
-          onChange={e => setSelectedCompany(e.target.value)}
-          className="border border-gray-300 rounded px-3 py-2 text-lg"
-          disabled={disabled}
-        >
-          {companyNames.map(name => (
-            <option key={name} value={name}>{name}</option>
-          ))}
-        </select>
-      </div>
+      {!hideCompanySelector && (
+        <div className="flex items-center justify-center gap-3 mb-4">
+          <label htmlFor={`company-select-${id}`} className="text-lg font-medium">Company:</label>
+          <select
+            id={`company-select-${id}`}
+            value={selectedCompany}
+            onChange={e => handleCompanyChange(e.target.value)}
+            className="border border-gray-300 rounded px-3 py-2 text-lg"
+            disabled={disabled}
+          >
+            {companyNames.map(name => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <h2 className="text-xl font-bold mb-1 text-center">
         {selectedCompany} — {isROA ? 'Return on Assets (ROA)' : selectedMetric}
@@ -136,9 +148,6 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
       {isROA ? (
         <>
           <div className={`transition-opacity duration-200 ${fetching ? 'opacity-40' : 'opacity-100'}`}>
-            <p className="text-center text-sm font-semibold mb-3 bg-blue-50 border border-blue-200 rounded px-4 py-2">
-              ROA = Net Profit Margin &times; Asset Turnover &nbsp;|&nbsp; Net Profit Margin = Net Income ÷ Revenue &nbsp;|&nbsp; Asset Turnover = Revenue ÷ Total Assets
-            </p>
             <table className="w-full border-collapse">
               <thead>
                 <tr className="bg-gray-100">
@@ -235,6 +244,7 @@ function App() {
   const [companyNames, setCompanyNames] = useState<string[]>([])
   const [metrics, setMetrics] = useState<string[]>([])
   const [selectedMetric, setSelectedMetric] = useState('')
+  const [secondCompany, setSecondCompany] = useState('')
   const [initLoading, setInitLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -257,6 +267,7 @@ function App() {
           setCompanyNames(names)
           setMetrics([...metricCols, 'roa'])
           setSelectedMetric(metricCols[0])
+          setSecondCompany(names[1] ?? 'none')
         }
         setInitLoading(false)
       })
@@ -286,11 +297,36 @@ function App() {
         </select>
       </div>
 
+      {/* Second company selector */}
+      <div className="flex items-center gap-3">
+        <label htmlFor="second-company-select" className="text-lg font-medium">Compare with:</label>
+        <select
+          id="second-company-select"
+          value={secondCompany}
+          onChange={e => setSecondCompany(e.target.value)}
+          className="border border-gray-300 rounded px-3 py-2 text-lg"
+          disabled={initLoading}
+        >
+          <option value="none">None</option>
+          {companyNames.map(name => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+      </div>
+
+      {selectedMetric === 'roa' && (
+        <div className="bg-blue-50 border border-blue-200 rounded px-6 py-3 text-sm font-semibold text-center">
+          <p>ROA = Net Profit Margin &times; Asset Turnover</p>
+          <p>Net Profit Margin = Net Income &divide; Revenue</p>
+          <p>Asset Turnover = Revenue &divide; Total Assets</p>
+        </div>
+      )}
+
       {initLoading && <p className="text-gray-500">Loading...</p>}
       {error && <p className="text-red-500">{error}</p>}
 
       {!initLoading && !error && (
-        <div className="w-full flex flex-col lg:flex-row gap-10">
+        <div className={`w-full ${secondCompany !== 'none' ? 'flex flex-col lg:flex-row gap-10' : ''}`}>
           <CompanyPanel
             id="1"
             companyNames={companyNames}
@@ -298,14 +334,21 @@ function App() {
             selectedMetric={selectedMetric}
             disabled={initLoading}
           />
-          <div className="hidden lg:block w-px bg-gray-200" />
-          <CompanyPanel
-            id="2"
-            companyNames={companyNames}
-            defaultCompany={companyNames[1] ?? ''}
-            selectedMetric={selectedMetric}
-            disabled={initLoading}
-          />
+          {secondCompany !== 'none' && (
+            <>
+              <div className="hidden lg:block w-px bg-gray-200" />
+              <CompanyPanel
+                id="2"
+                companyNames={companyNames}
+                defaultCompany={secondCompany}
+                selectedMetric={selectedMetric}
+                disabled={initLoading}
+                company={secondCompany}
+                onCompanyChange={setSecondCompany}
+                hideCompanySelector={true}
+              />
+            </>
+          )}
         </div>
       )}
     </div>

@@ -18,6 +18,11 @@ function formatValue(amount: string, currency: string): string {
   return `${symbol}${num}`
 }
 
+function formatPercent(value: string | number) {
+  const num = Number(value)
+  return isNaN(num) ? '—' : `${num.toFixed(2)}%`
+}
+
 const API_BASE = 'https://www.dolthub.com/api/v1alpha1/calvinw/BusMgmtBenchmarks?q='
 
 function buildUrl(query: string) {
@@ -64,7 +69,25 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
     fetch(buildUrl(query))
       .then(res => res.json())
       .then(data => {
-        setYearlyData(data.rows)
+        // After loading the raw data, compute ROA and its two DuPont components for every year.
+        // Net Profit Margin = Net Income / Revenue  (how much profit from each dollar of sales)
+        // Asset Turnover    = Revenue / Total Assets (how efficiently assets generate sales)
+        // ROA               = Net Profit Margin × Asset Turnover = Net Income / Total Assets
+        const rows = (data.rows as FinancialRow[]).map(row => {
+          const netIncome   = Number(row['Net Profit'])
+          const totalAssets = Number(row['Total Assets'])
+          const revenue     = Number(row['Net Revenue'])
+          const hasNI  = row['Net Profit']   !== '' && !isNaN(netIncome)
+          const hasTA  = row['Total Assets'] !== '' && !isNaN(totalAssets) && totalAssets !== 0
+          const hasRev = row['Net Revenue']  !== '' && !isNaN(revenue)
+          return {
+            ...row,
+            _roa:               hasNI && hasTA                   ? String((netIncome / totalAssets) * 100) : '',
+            _net_profit_margin: hasNI && hasRev && revenue !== 0 ? String((netIncome / revenue) * 100)     : '',
+            _asset_turnover:    hasRev && hasTA                  ? String(revenue / totalAssets)            : '',
+          }
+        })
+        setYearlyData(rows)
         setFetching(false)
       })
       .catch(() => {
@@ -74,9 +97,12 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
   }, [selectedCompany])
 
   const currency = yearlyData[0]?.currency ?? ''
+  const isROA = selectedMetric === 'roa'
   const chartData = yearlyData.map(row => ({
     year: row.year,
-    value: row[selectedMetric] !== '' ? Number(row[selectedMetric]) : null,
+    value: isROA
+      ? (row._roa !== '' ? Number(row._roa) : null)
+      : (row[selectedMetric] !== '' ? Number(row[selectedMetric]) : null),
   }))
 
   return (
@@ -98,32 +124,76 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
       </div>
 
       <h2 className="text-xl font-bold mb-1 text-center">
-        {selectedCompany} — {selectedMetric}
+        {selectedCompany} — {isROA ? 'Return on Assets (ROA)' : selectedMetric}
       </h2>
-      <p className="text-sm text-gray-500 mb-4 text-center">All figures in thousands (local currency)</p>
+      <p className="text-sm text-gray-500 mb-4 text-center">
+        {isROA ? 'Figures shown as percentages (%) or ratios' : 'All figures in thousands (local currency)'}
+      </p>
 
       {error && <p className="text-red-500 text-center">{error}</p>}
 
-      <table className={`w-full border-collapse transition-opacity duration-200 ${fetching ? 'opacity-40' : 'opacity-100'}`}>
-        <thead>
-          <tr className="bg-gray-100">
-            <th className="border border-gray-300 px-4 py-2 text-left">Year</th>
-            <th className="border border-gray-300 px-4 py-2 text-right">{selectedMetric} (thousands)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {yearlyData.map((row, index) => (
-            <tr key={row.year} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-              <td className="border border-gray-300 px-4 py-2">{row.year}</td>
-              <td className="border border-gray-300 px-4 py-2 text-right">
-                {row[selectedMetric] != null && row[selectedMetric] !== ''
-                  ? formatValue(row[selectedMetric], currency)
-                  : '—'}
-              </td>
+      {/* ── ROA DuPont breakdown table ── */}
+      {isROA ? (
+        <>
+          <div className={`transition-opacity duration-200 ${fetching ? 'opacity-40' : 'opacity-100'}`}>
+            <p className="text-center text-sm font-semibold mb-3 bg-blue-50 border border-blue-200 rounded px-4 py-2">
+              ROA = Net Profit Margin &times; Asset Turnover &nbsp;|&nbsp; Net Profit Margin = Net Income ÷ Revenue &nbsp;|&nbsp; Asset Turnover = Revenue ÷ Total Assets
+            </p>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="border border-gray-300 px-4 py-2 text-left">Year</th>
+                  <th className="border border-gray-300 px-4 py-2 text-right">Net Profit Margin (%)</th>
+                  <th className="border border-gray-300 px-4 py-2 text-center">×</th>
+                  <th className="border border-gray-300 px-4 py-2 text-right">Asset Turnover</th>
+                  <th className="border border-gray-300 px-4 py-2 text-center">=</th>
+                  <th className="border border-gray-300 px-4 py-2 text-right">ROA (%)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {yearlyData.map((row, index) => (
+                  <tr key={row.year} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                    <td className="border border-gray-300 px-4 py-2">{row.year}</td>
+                    <td className="border border-gray-300 px-4 py-2 text-right">
+                      {row._net_profit_margin !== '' ? formatPercent(row._net_profit_margin) : '—'}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2 text-center text-gray-400">×</td>
+                    <td className="border border-gray-300 px-4 py-2 text-right">
+                      {row._asset_turnover !== '' ? Number(row._asset_turnover).toFixed(2) : '—'}
+                    </td>
+                    <td className="border border-gray-300 px-4 py-2 text-center text-gray-400">=</td>
+                    <td className="border border-gray-300 px-4 py-2 text-right font-semibold">
+                      {row._roa !== '' ? formatPercent(row._roa) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        /* ── Normal single-metric table ── */
+        <table className={`w-full border-collapse transition-opacity duration-200 ${fetching ? 'opacity-40' : 'opacity-100'}`}>
+          <thead>
+            <tr className="bg-gray-100">
+              <th className="border border-gray-300 px-4 py-2 text-left">Year</th>
+              <th className="border border-gray-300 px-4 py-2 text-right">{selectedMetric} (thousands)</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {yearlyData.map((row, index) => (
+              <tr key={row.year} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                <td className="border border-gray-300 px-4 py-2">{row.year}</td>
+                <td className="border border-gray-300 px-4 py-2 text-right">
+                  {row[selectedMetric] != null && row[selectedMetric] !== ''
+                    ? formatValue(row[selectedMetric], currency)
+                    : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <div className={`mt-8 transition-opacity duration-200 ${fetching ? 'opacity-40' : 'opacity-100'}`}>
         <ResponsiveContainer width="100%" height={300}>
@@ -132,6 +202,7 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
             <XAxis dataKey="year" />
             <YAxis
               tickFormatter={v => {
+                if (isROA) return `${Number(v).toFixed(1)}%`
                 const sym = currencySymbols[currency] ?? currency
                 return currency === 'SEK'
                   ? `${Number(v).toLocaleString()} ${sym}`
@@ -141,8 +212,12 @@ function CompanyPanel({ id, companyNames, defaultCompany, selectedMetric, disabl
             />
             <Tooltip
               formatter={(v) => [
-                v != null ? formatValue(String(v), currency) : '—',
-                selectedMetric,
+                v != null
+                  ? isROA
+                    ? formatPercent(String(v))
+                    : formatValue(String(v), currency)
+                  : '—',
+                isROA ? 'ROA' : selectedMetric,
               ]}
               labelFormatter={label => `Year: ${label}`}
             />
@@ -180,7 +255,7 @@ function App() {
           const allKeys = Object.keys(rows[0])
           const metricCols = allKeys.filter(k => k !== 'company_name' && k !== 'year' && k !== 'currency')
           setCompanyNames(names)
-          setMetrics(metricCols)
+          setMetrics([...metricCols, 'roa'])
           setSelectedMetric(metricCols[0])
         }
         setInitLoading(false)
@@ -206,7 +281,7 @@ function App() {
           disabled={initLoading}
         >
           {metrics.map(m => (
-            <option key={m} value={m}>{m}</option>
+            <option key={m} value={m}>{m === 'roa' ? 'Return on Assets (ROA)' : m}</option>
           ))}
         </select>
       </div>
